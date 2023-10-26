@@ -1,7 +1,7 @@
 import time
 import torch.backends.cudnn as cudnn
 from torch import nn
-from models import Generator, Discriminator, TruncatedVGG19
+from models import Generator, Discriminator, TruncatedVGG19, YeNet
 from datasets import SRDataset
 from utils import *
 
@@ -74,6 +74,17 @@ def main():
         optimizer_d = torch.optim.Adam(params=filter(lambda p: p.requires_grad, discriminator.parameters()),
                                        lr=lr)
 
+
+        steganalyzer = YeNet()
+
+        optimizer_s = torch.optim.Adamax(
+            steganalyzer.parameters(),
+            lr=lr,
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=0,
+        )                
+
     else:
         checkpoint = torch.load(checkpoint)
         start_epoch = checkpoint['epoch'] + 1
@@ -90,13 +101,17 @@ def main():
     # Loss functions
     content_loss_criterion = nn.MSELoss()
     adversarial_loss_criterion = nn.BCEWithLogitsLoss()
+    steganalyzer_loss_criterion = nn.NLLLoss()
 
     # Move to default device
     generator = generator.to(device)
     discriminator = discriminator.to(device)
+    steganalyzer = steganalyzer.to(device)
     truncated_vgg19 = truncated_vgg19.to(device)
     content_loss_criterion = content_loss_criterion.to(device)
     adversarial_loss_criterion = adversarial_loss_criterion.to(device)
+
+    steganalyzer = steganalyzer.apply(weights_init)
 
     # Custom dataloaders
     train_dataset = SRDataset(data_folder,
@@ -123,11 +138,14 @@ def main():
         train(train_loader=train_loader,
               generator=generator,
               discriminator=discriminator,
+              steganalyzer=steganalyzer,
               truncated_vgg19=truncated_vgg19,
               content_loss_criterion=content_loss_criterion,
               adversarial_loss_criterion=adversarial_loss_criterion,
+              steganalyzer_loss_criterion=steganalyzer_loss_criterion,
               optimizer_g=optimizer_g,
               optimizer_d=optimizer_d,
+              optimizer_s=optimizer_s
               epoch=epoch)
 
         # Save checkpoint
@@ -139,8 +157,8 @@ def main():
                    'checkpoint_srgan.pth.tar')
 
 
-def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_criterion, adversarial_loss_criterion,
-          optimizer_g, optimizer_d, epoch):
+def train(train_loader, generator, discriminator, steganalyzer, truncated_vgg19, content_loss_criterion, adversarial_loss_criterion,
+        steganalyzer_loss_criterion, optimizer_g, optimizer_d, optimizer_s, epoch):
     """
     One epoch's training.
 
@@ -157,12 +175,14 @@ def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_
     # Set to train mode
     generator.train()
     discriminator.train()  # training mode enables batch normalization
+    steganalyzer.train()
 
     batch_time = AverageMeter()  # forward prop. + back prop. time
     data_time = AverageMeter()  # data loading time
     losses_c = AverageMeter()  # content loss
     losses_a = AverageMeter()  # adversarial loss in the generator
     losses_d = AverageMeter()  # adversarial loss in the discriminator
+    losses_s = AverageMeter()
 
     start = time.time()
 
@@ -178,8 +198,27 @@ def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_
 
         # Generate
         sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
+        cover_img = convert_image(sr_imgs,source='[-1, 1]', target='[0, 255]')
         sr_imgs = convert_image(sr_imgs, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
 
+        #Steganografi Encode
+
+        labels = np.random.choice([0, 1], (batch_size, 1, 1, 1))
+        encoded_images = []
+        for container, label in zip(cover_img, labels):
+            if label == 1:
+                msg = bytes_to_bits(next(text_iterator))
+                key = generate_random_key(container.shape[1:], len(msg))
+                # to [-1, 1]
+                container = transform_encoder(container)
+                container = encoder.encode(container, msg, key)
+                # to [0...255]
+                container = inverse_transform_encoder(container)
+            encoded_images.append(container)
+
+        encoded_images = torch.stack(encoded_images)
+        labels = torch.from_numpy(labels).float()
+        
         # Calculate VGG feature maps for the super-resolved (SR) and high resolution (HR) images
         sr_imgs_in_vgg_space = truncated_vgg19(sr_imgs)
         hr_imgs_in_vgg_space = truncated_vgg19(hr_imgs).detach()  # detached because they're constant, targets
@@ -187,14 +226,23 @@ def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_
         # Discriminate super-resolved (SR) images
         sr_discriminated = discriminator(sr_imgs)  # (N)
 
+        #Discriminate Steganalyzer
+
+        stego_discriminate = steganalyzer(encoded_images)
+
+
+        
+
         # Calculate the Perceptual loss
         content_loss = content_loss_criterion(sr_imgs_in_vgg_space, hr_imgs_in_vgg_space)
         adversarial_loss = adversarial_loss_criterion(sr_discriminated, torch.ones_like(sr_discriminated))
+        steganalyzer_loss = loss_fn(encoded_images, labels)
         perceptual_loss = content_loss + beta * adversarial_loss
 
         # Back-prop.
         optimizer_g.zero_grad()
         perceptual_loss.backward()
+        steganalyzer_loss.backward()
 
         # Clip gradients, if necessary
         if grad_clip is not None:
@@ -202,10 +250,12 @@ def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_
 
         # Update generator
         optimizer_g.step()
+        optimizer_s.step()
 
         # Keep track of loss
         losses_c.update(content_loss.item(), lr_imgs.size(0))
         losses_a.update(adversarial_loss.item(), lr_imgs.size(0))
+        losses_s.update(steganalyzer_loss.item())
 
         # DISCRIMINATOR UPDATE
 
