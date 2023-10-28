@@ -133,7 +133,7 @@ class SRResNet(nn.Module):
     The SRResNet, as defined in the paper.
     """
 
-    def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16, scaling_factor=4):
+    def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16, scaling_factor=4, data_depth=4, hidden_size=32):
         """
         :param large_kernel_size: kernel size of the first and last convolutions which transform the inputs and outputs
         :param small_kernel_size: kernel size of all convolutions in-between, i.e. those in the residual and subpixel convolutional blocks
@@ -142,6 +142,9 @@ class SRResNet(nn.Module):
         :param scaling_factor: factor to scale input images by (along both dimensions) in the subpixel convolutional block
         """
         super(SRResNet, self).__init__()
+
+        self.data_depth = data_depth
+        self.hidden_size = hidden_size
 
         # Scaling factor must be 2, 4, or 8
         scaling_factor = int(scaling_factor)
@@ -170,7 +173,26 @@ class SRResNet(nn.Module):
         self.conv_block3 = ConvolutionalBlock(in_channels=n_channels, out_channels=3, kernel_size=large_kernel_size,
                                               batch_norm=False, activation='Tanh')
 
-    def forward(self, lr_imgs):
+        self.conv1 = nn.Sequential(
+            self._conv2d(3, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv2 = nn.Sequential(
+            self._conv2d(self.hidden_size + self.data_depth, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv3 = nn.Sequential(
+            self._conv2d(self.hidden_size, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv4 = nn.Sequential(
+            self._conv2d(self.hidden_size, 3),
+        )
+
+    def forward(self, lr_imgs,data):
         """
         Forward prop.
 
@@ -184,8 +206,12 @@ class SRResNet(nn.Module):
         output = output + residual  # (N, n_channels, w, h)
         output = self.subpixel_convolutional_blocks(output)  # (N, n_channels, w * scaling factor, h * scaling factor)
         sr_imgs = self.conv_block3(output)  # (N, 3, w * scaling factor, h * scaling factor)
+        x_data = self.conv1(sr_imgs)
+        x_1 = self.conv2(torch.cat([x_data]+[data],dim=1))
+        x_2 = self.conv3(x_1)
+        X_3 =self.conv4(x_2)
 
-        return sr_imgs
+        return x_3
 
 
 class Generator(nn.Module):
@@ -193,7 +219,7 @@ class Generator(nn.Module):
     The generator in the SRGAN, as defined in the paper. Architecture identical to the SRResNet.
     """
 
-    def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16, scaling_factor=4):
+    def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16, scaling_factor=4,data_depth=4, hidden_size=32):
         """
         :param large_kernel_size: kernel size of the first and last convolutions which transform the inputs and outputs
         :param small_kernel_size: kernel size of all convolutions in-between, i.e. those in the residual and subpixel convolutional blocks
@@ -205,7 +231,7 @@ class Generator(nn.Module):
 
         # The generator is simply an SRResNet, as above
         self.net = SRResNet(large_kernel_size=large_kernel_size, small_kernel_size=small_kernel_size,
-                            n_channels=n_channels, n_blocks=n_blocks, scaling_factor=scaling_factor)
+                            n_channels=n_channels, n_blocks=n_blocks, scaling_factor=scaling_factor,data_depth=4, hidden_size=32)
 
     def initialize_with_srresnet(self, srresnet_checkpoint):
         """
@@ -235,7 +261,7 @@ class Discriminator(nn.Module):
     The discriminator in the SRGAN, as defined in the paper.
     """
 
-    def __init__(self, kernel_size=3, n_channels=64, n_blocks=8, fc_size=1024):
+    def __init__(self, kernel_size=3, n_channels=32, n_blocks=8, fc_size=1024):
         """
         :param kernel_size: kernel size in all convolutional blocks
         :param n_channels: number of output channels in the first convolutional block, after which it is doubled in every 2nd block thereafter
@@ -342,105 +368,96 @@ class TruncatedVGG19(nn.Module):
         return output
 
 
-class SRMConv(nn.Module):
-    """This class computes convolution of input tensor with 30 SRM filters"""
+import torch
+from torch import nn
+#from torch.nn import Sigmoid
+#from torch.distributions import Bernoulli
 
-    def __init__(self) -> None:
-        """Constructor."""
+
+class BasicDecoder(nn.Module):
+    """
+    The BasicDecoder module takes an steganographic image and attempts to decode
+    the embedded data tensor.
+
+    Input: (N, 3, H, W)
+    Output: (N, D, H, W)
+    """
+    def _name(self):
+      return "BasicDecoder"
+
+    def _conv2d(self, in_channels, out_channels):
+        return nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            padding=1
+        )
+
+    def _build_models(self):
+        self.conv1 = nn.Sequential(
+            self._conv2d(3, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv2 = nn.Sequential(
+            self._conv2d(self.hidden_size, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv3 = nn.Sequential(
+            self._conv2d(self.hidden_size, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size),
+        )
+        self.conv4 = nn.Sequential(
+            self._conv2d(self.hidden_size, self.data_depth),
+            #nn.Sigmoid(),
+        )
+
+        return self.conv1, self.conv2, self.conv3, self.conv4
+
+    def forward(self, image):
+        x = self._models[0](image)
+        x_1 = self._models[1](x)
+        x_2 = self._models[2](x_1)
+        x_3 = self._models[3](x_2)
+        #x_4 = Bernoulli(x_3).sample()
+        return x_3
+
+    def __init__(self, data_depth, hidden_size):
         super().__init__()
-        self.device = torch.device(
-            "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.data_depth = data_depth
+        self.hidden_size = hidden_size
+        self._models = self._build_models()
+        self.name = self._name()
+
+
+class DenseDecoder(BasicDecoder):
+    def _name(self):
+      return "DenseDecoder"
+
+    def _build_models(self):
+        self.conv1 = super()._build_models()[0]
+        self.conv2 = super()._build_models()[1]
+        self.conv3 = nn.Sequential(
+            self._conv2d(self.hidden_size * 2, self.hidden_size),
+            nn.LeakyReLU(inplace=True),
+            nn.BatchNorm2d(self.hidden_size)
         )
-        self.srm = torch.from_numpy(np.load(".\\srm.npy")).to(
-            self.device, dtype=torch.float
-        )
-        self.tlu = nn.Hardtanh(min_val=-3.0, max_val=3.0)
-
-    def forward(self, inp: Tensor) -> Tensor:
-        """Returns output tensor after convolution with 30 SRM filters
-        followed by TLU activation."""
-        return self.tlu(F.conv2d(inp, self.srm))
-
-
-class ConvBlock(nn.Module):
-    """This class returns building block for YeNet class."""
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-        stride: int = 1,
-        padding: int = 0,
-        use_pool: bool = False,
-        pool_size: int = 3,
-        pool_padding: int = 0,
-    ) -> None:
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=True,
-        )
-        self.activation = nn.ReLU()
-        self.pool = nn.AvgPool2d(
-            kernel_size=pool_size, stride=2, padding=pool_padding
-        )
-        self.use_pool = use_pool
-
-    def forward(self, inp: Tensor) -> Tensor:
-        """Returns conv->gaussian->average pooling."""
-        if self.use_pool:
-            return self.pool(self.activation(self.conv(inp)))
-        return self.activation(self.conv(inp))
-
-
-class YeNet(nn.Module):
-    """This class returns YeNet model."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.layer1 = ConvBlock(30, 30, kernel_size=3)
-        self.layer2 = ConvBlock(30, 30, kernel_size=3)
-        self.layer3 = ConvBlock(
-            30, 30, kernel_size=3, use_pool=True, pool_size=2, pool_padding=0
-        )
-        self.layer4 = ConvBlock(
-            30,
-            32,
-            kernel_size=5,
-            padding=0,
-            use_pool=True,
-            pool_size=3,
-            pool_padding=0,
-        )
-        self.layer5 = ConvBlock(
-            32, 32, kernel_size=5, use_pool=True, pool_padding=0
-        )
-        self.layer6 = ConvBlock(32, 32, kernel_size=5, use_pool=True)
-        self.layer7 = ConvBlock(32, 16, kernel_size=3)
-        self.layer8 = ConvBlock(16, 16, kernel_size=3, stride=3)
-        self.fully_connected = nn.Sequential(
-            nn.Linear(in_features=16 * 3 * 3, out_features=2),
-            nn.LogSoftmax(dim=1),
+        self.conv4 = nn.Sequential(
+            self._conv2d(self.hidden_size * 3, self.data_depth),
+            #nn.Sigmoid(),
         )
 
-    def forward(self, image: Tensor) -> Tensor:
-        """Returns logit for the given tensor."""
-        out = SRMConv()(image)
-        out = nn.Sequential(
-            self.layer1,
-            self.layer2,
-            self.layer3,
-            self.layer4,
-            self.layer5,
-            self.layer6,
-            self.layer7,
-            self.layer8,
-        )(out)
-        out = out.view(out.size(0), -1)
-        out = self.fully_connected(out)
-        return out
+        return self.conv1, self.conv2, self.conv3, self.conv4
+
+    def forward(self, image):
+        x = self._models[0](image)
+        x_list = [x]
+        x_1 = self._models[1](torch.cat(x_list, dim=1))
+        x_list.append(x_1)
+        x_2 = self._models[2](torch.cat(x_list, dim=1))
+        x_list.append(x_2)
+        x_3 = self._models[3](torch.cat(x_list, dim=1))
+        x_list.append(x_3)
+        return x_3
