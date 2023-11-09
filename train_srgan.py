@@ -1,13 +1,28 @@
 import time
 import torch.backends.cudnn as cudnn
 from torch import nn
-from torch.nn.functional import binary_cross_entropy_with_logits, mse_loss
-from models import Generator, Discriminator, TruncatedVGG19, YeNet
+from models import Generator, Discriminator, TruncatedVGG19
+from xunet import XuNet
 from datasets import SRDataset
+from text import TextLoader
 from utils import *
+from stegano.utils import *
+from stegano.encoders import * 
+
+# Weight initialization for conv layers and fc layers
+def weights_init(param: Any) -> None:
+    """Initializes weights of Conv and fully connected."""
+
+    if isinstance(param, nn.Conv2d):
+        torch.nn.init.xavier_uniform_(param.weight.data)
+        if param.bias is not None:
+            torch.nn.init.constant_(param.bias.data, 0.2)
+    elif isinstance(param, nn.Linear):
+        torch.nn.init.normal_(param.weight.data, mean=0.0, std=0.01)
+        torch.nn.init.constant_(param.bias.data, 0.0)
 
 # Data parameters
-data_folder = './datasets'  # folder with JSON data files
+data_folder = './'  # folder with JSON data files
 crop_size = 96  # crop size of target HR images
 scaling_factor = 4  # the scaling factor for the generator; the input LR images will be downsampled from the target HR images by this factor
 
@@ -52,19 +67,14 @@ def main():
     # Initialize model or load checkpoint
     if checkpoint is None:
         # Generator
-        data_depth = 4  # Adjust as needed
-h       idden_size = 32  # Adjust as needed
-        scaling_factor = 4  # Adjust as needed
         generator = Generator(large_kernel_size=large_kernel_size_g,
                               small_kernel_size=small_kernel_size_g,
                               n_channels=n_channels_g,
                               n_blocks=n_blocks_g,
-                              data_depth=data_depth, 
-                              hidden_size=hidden_size,
                               scaling_factor=scaling_factor)
 
         # Initialize generator network with pretrained SRResNet
-        # generator.initialize_with_srresnet(srresnet_checkpoint=srresnet_checkpoint)
+        generator.initialize_with_srresnet(srresnet_checkpoint=srresnet_checkpoint)
 
         # Initialize generator's optimizer
         optimizer_g = torch.optim.Adam(params=filter(lambda p: p.requires_grad, generator.parameters()),
@@ -80,11 +90,20 @@ h       idden_size = 32  # Adjust as needed
         optimizer_d = torch.optim.Adam(params=filter(lambda p: p.requires_grad, discriminator.parameters()),
                                        lr=lr)
 
+        steganalyzer = XuNet()
+        steganalyzer = steganalyzer.apply(weights_init)
 
-        decoder = DenseDecoder()
+        optimizer_s = torch.optim.Adamax(steganalyzer.parameters(),
+                                        lr=opt.lr,
+                                        betas=(0.9, 0.999),
+                                        eps=1e-8,
+                                        weight_decay=0,
+                                    )
+        
+        
 
-        en_de_optimizer = torch.optim.Adam(list(decoder.parameters()) + list(generator.parameters()), lr=1e-4)
-          
+        
+
 
     else:
         checkpoint = torch.load(checkpoint)
@@ -102,15 +121,16 @@ h       idden_size = 32  # Adjust as needed
     # Loss functions
     content_loss_criterion = nn.MSELoss()
     adversarial_loss_criterion = nn.BCEWithLogitsLoss()
+    stego_loss_criterion = nn.NLLLoss()
 
     # Move to default device
     generator = generator.to(device)
     discriminator = discriminator.to(device)
-    decoder = decoder.to(device)
-
+    steganalyzer = steganalyzer.to(device)
     truncated_vgg19 = truncated_vgg19.to(device)
     content_loss_criterion = content_loss_criterion.to(device)
     adversarial_loss_criterion = adversarial_loss_criterion.to(device)
+    stego_loss_criterion = stego_loss_criterion.to(device)
 
     # Custom dataloaders
     train_dataset = SRDataset(data_folder,
@@ -122,8 +142,13 @@ h       idden_size = 32  # Adjust as needed
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers,
                                                pin_memory=True)
 
+    encoder = SigmoidTorchEncoder(beta=10)
+    text_loader = TextLoader()
+    text_iterator = text_loader.create_generator()                                        
+
     # Total number of epochs to train for
-    epochs = int(iterations // len(train_loader) + 1)
+    # epochs = int(iterations // len(train_loader) + 1)
+    epochs = 10
 
     # Epochs
     for epoch in range(start_epoch, epochs):
@@ -137,26 +162,29 @@ h       idden_size = 32  # Adjust as needed
         train(train_loader=train_loader,
               generator=generator,
               discriminator=discriminator,
-              decoder=decoder,
+              steganalyzer=steganalyzer,
               truncated_vgg19=truncated_vgg19,
               content_loss_criterion=content_loss_criterion,
               adversarial_loss_criterion=adversarial_loss_criterion,
+              stego_loss_criterion=stego_loss_criterion,
               optimizer_g=optimizer_g,
               optimizer_d=optimizer_d,
-              en_de_optimizer=en_de_optimizer,
+              optimizer_s=optimizer_s,
               epoch=epoch)
 
         # Save checkpoint
         torch.save({'epoch': epoch,
                     'generator': generator,
                     'discriminator': discriminator,
+                    'steganalyzer': steganalyzer,
                     'optimizer_g': optimizer_g,
-                    'optimizer_d': optimizer_d},
+                    'optimizer_d': optimizer_d,
+                    'optimizer_s': optimizer_s},
                    'checkpoint_srgan.pth.tar')
 
 
-def train(train_loader, generator, discriminator, decoder, truncated_vgg19, content_loss_criterion, adversarial_loss_criterion,
-        optimizer_g, optimizer_d, en_de_optimizer, epoch):
+def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, content_loss_criterion, adversarial_loss_criterion,
+          stego_loss_criterion, optimizer_g, optimizer_d, optimizer_s, epoch):
     """
     One epoch's training.
 
@@ -173,14 +201,14 @@ def train(train_loader, generator, discriminator, decoder, truncated_vgg19, cont
     # Set to train mode
     generator.train()
     discriminator.train()  # training mode enables batch normalization
-    decoder.train()
+    steganalyzer.train()
 
     batch_time = AverageMeter()  # forward prop. + back prop. time
     data_time = AverageMeter()  # data loading time
     losses_c = AverageMeter()  # content loss
     losses_a = AverageMeter()  # adversarial loss in the generator
     losses_d = AverageMeter()  # adversarial loss in the discriminator
-    losses_de = AverageMeter()
+    losses_s = AverageMeter()
 
     start = time.time()
 
@@ -192,30 +220,40 @@ def train(train_loader, generator, discriminator, decoder, truncated_vgg19, cont
         lr_imgs = lr_imgs.to(device)  # (batch_size (N), 3, 24, 24), imagenet-normed
         hr_imgs = hr_imgs.to(device)  # (batch_size (N), 3, 96, 96), imagenet-normed
 
-        N, _, H, W = lr.size()
-
         # GENERATOR UPDATE
 
         # Generate
-        payload = torch.zeros(N, 32, H*4, W*4).random_(0, 2)
-        sr_imgs = generator(lr_imgs,payload)  # (N, 3, 96, 96), in [-1, 1]
-        sr_imgs = convert_image(sr_imgs, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
+        sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
+        container = convert_image(sr_imgs, source='[-1, 1]', target='[0, 255]')  # (N, 3, 96, 96), imagenet-normed
 
-        decoded = decoder.forward(sr_imgs)
-        encoder_mse = mse_loss(generated, hr_imgs)
-        decoder_loss = binary_cross_entropy_with_logits(decoded, payload)
-        decoder_acc = (decoded >= 0.0).eq(
-        payload >= 0.5).sum().float() / payload.numel()
-        
+        labels = np.random.choice([0, 1], (batch_size, 1, 1, 1))
+        encodeed_images = []
+        for container, label in zip(containers, labels):
+            if label == 1:
+                msg = bytes_to_bits(next(text_iterator))
+                key = generate_random_key(container.shape[1:], len(msg))
+                # to 0,255 [-1, 1]
+                container = transform_encoder(container)
+                container = encoder.encode(container, msg, key)
+                # to [0...255]
+                container = inverse_transform_encoder(container)
+                encoded_images.append(container)
+
+        encoded_images = torch.stack(encoded_images)
+        labels = torch.from_numpy(labels).float()  
+
+        message_analyser_opt.zero_grad()
+
+
+
+        sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
+
         # Calculate VGG feature maps for the super-resolved (SR) and high resolution (HR) images
         sr_imgs_in_vgg_space = truncated_vgg19(sr_imgs)
         hr_imgs_in_vgg_space = truncated_vgg19(hr_imgs).detach()  # detached because they're constant, targets
 
         # Discriminate super-resolved (SR) images
         sr_discriminated = discriminator(sr_imgs)  # (N)
-
-        generated_score = torch.mean(sr_discriminated)
-            
 
         # Calculate the Perceptual loss
         content_loss = content_loss_criterion(sr_imgs_in_vgg_space, hr_imgs_in_vgg_space)
@@ -225,8 +263,6 @@ def train(train_loader, generator, discriminator, decoder, truncated_vgg19, cont
         # Back-prop.
         optimizer_g.zero_grad()
         perceptual_loss.backward()
-        (100 * encoder_mse + decoder_loss + generated_score).backward()  # Why 100?
-        en_de_optimizer.zero_grad()
 
         # Clip gradients, if necessary
         if grad_clip is not None:
@@ -234,11 +270,10 @@ def train(train_loader, generator, discriminator, decoder, truncated_vgg19, cont
 
         # Update generator
         optimizer_g.step()
-        en_de_optimizer.step()
 
         # Keep track of loss
         losses_c.update(content_loss.item(), lr_imgs.size(0))
-        losses_a.update(adversarial_loss.item(), lr_imgs.size(0))
+        losses_a.update(adversarial_loss.item(), lr_imgs.size(0))        
 
         # DISCRIMINATOR UPDATE
 
@@ -281,21 +316,14 @@ def train(train_loader, generator, discriminator, decoder, truncated_vgg19, cont
                   'Data Time {data_time.val:.3f} ({data_time.avg:.3f})----'
                   'Cont. Loss {loss_c.val:.4f} ({loss_c.avg:.4f})----'
                   'Adv. Loss {loss_a.val:.4f} ({loss_a.avg:.4f})----'
-                  'Disc. Loss {loss_d.val:.4f} ({loss_d.avg:.4f})----'
-                  'ssim: {ssim.val:.4f} ----'
-                  'psnr:{psnr.val:.4f} ----'
-                  'bpp: {bpp.val:.4f}'.format(epoch,i,
+                  'Disc. Loss {loss_d.val:.4f} ({loss_d.avg:.4f})'.format(epoch,
+                                                                          i,
                                                                           len(train_loader),
                                                                           batch_time=batch_time,
                                                                           data_time=data_time,
                                                                           loss_c=losses_c,
                                                                           loss_a=losses_a,
-                                                                          loss_d=losses_d,
-                                                                          ssim=ssim(hr_imgs, sr_imgs).item(),
-                                                                          psnr=10 * torch.log10(4 / encoder_mse).item(),
-                                                                          bpp=4 * (2 * decoder_acc.item() - 1)
-                                                                          ))
-                                                                          
+                                                                          loss_d=losses_d))
 
     del lr_imgs, hr_imgs, sr_imgs, hr_imgs_in_vgg_space, sr_imgs_in_vgg_space, hr_discriminated, sr_discriminated  # free some memory since their histories may be stored
 
