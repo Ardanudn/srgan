@@ -2,24 +2,23 @@ import time
 import torch.backends.cudnn as cudnn
 from torch import nn
 from models import Generator, Discriminator, TruncatedVGG19
-from xunet import XuNet
+from xunet import XuNet, Stegoanalyser
 from datasets import SRDataset
 from text import TextLoader
 from utils import *
 from stegano.utils import *
 from stegano.encoders import * 
 
-# Weight initialization for conv layers and fc layers
-def weights_init(param: Any) -> None:
-    """Initializes weights of Conv and fully connected."""
-
-    if isinstance(param, nn.Conv2d):
-        torch.nn.init.xavier_uniform_(param.weight.data)
-        if param.bias is not None:
-            torch.nn.init.constant_(param.bias.data, 0.2)
-    elif isinstance(param, nn.Linear):
-        torch.nn.init.normal_(param.weight.data, mean=0.0, std=0.01)
-        torch.nn.init.constant_(param.bias.data, 0.0)
+def init_weights(w):
+    """
+    Initializes the weights of the layer, w.
+    """
+    classname = w.__class__.__name__
+    if classname.find('conv') != -1:
+        nn.init.normal_(w.weight.data, 0.0, 0.02)
+    elif classname.find('bn') != -1:
+        nn.init.normal_(w.weight.data, 1.0, 0.02)
+        nn.init.constant_(w.bias.data, 0)
 
 # Data parameters
 data_folder = './'  # folder with JSON data files
@@ -90,15 +89,9 @@ def main():
         optimizer_d = torch.optim.Adam(params=filter(lambda p: p.requires_grad, discriminator.parameters()),
                                        lr=lr)
 
-        steganalyzer = XuNet()
-        steganalyzer = steganalyzer.apply(weights_init)
+        steganalyzer = Stegoanalyser()
 
-        optimizer_s = torch.optim.Adamax(steganalyzer.parameters(),
-                                        lr=opt.lr,
-                                        betas=(0.9, 0.999),
-                                        eps=1e-8,
-                                        weight_decay=0,
-                                    )
+        optimizer_s = torch.optim.Adam(steganalyzer.parameters(), lr==1e-4, betas=(0.5, 0.99))
         
         
 
@@ -121,7 +114,7 @@ def main():
     # Loss functions
     content_loss_criterion = nn.MSELoss()
     adversarial_loss_criterion = nn.BCEWithLogitsLoss()
-    stego_loss_criterion = nn.NLLLoss()
+    stego_loss_criterion = F.binary_cross_entropy_with_logits
 
     # Move to default device
     generator = generator.to(device)
@@ -170,7 +163,9 @@ def main():
               optimizer_g=optimizer_g,
               optimizer_d=optimizer_d,
               optimizer_s=optimizer_s,
-              epoch=epoch)
+              epoch=epoch,
+              encoder=encoder,
+              text_iterator=text_iterator)
 
         # Save checkpoint
         torch.save({'epoch': epoch,
@@ -184,7 +179,7 @@ def main():
 
 
 def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, content_loss_criterion, adversarial_loss_criterion,
-          stego_loss_criterion, optimizer_g, optimizer_d, optimizer_s, epoch):
+          stego_loss_criterion, optimizer_g, optimizer_d, optimizer_s, epoch,encoder,text_iterator):
     """
     One epoch's training.
 
@@ -240,11 +235,21 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
                 encoded_images.append(container)
 
         encoded_images = torch.stack(encoded_images)
-        labels = torch.from_numpy(labels).float()  
+        labels = torch.from_numpy(labels).float()
 
-        message_analyser_opt.zero_grad()
+        # train analyser
+        optimizer_s.zero_grad()
+
+        encoded_images.detach().to(device)
+        labels.to(device)
+
+        predict = steganalyzer(encoded_images)
+
+        stego_loss = stego_loss_criterion(predict,labels)
 
 
+        stego_loss.backward
+        optimizer_s.step()
 
         sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
 
