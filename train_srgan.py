@@ -8,6 +8,7 @@ from text import TextLoader
 from utils import *
 from stegano.utils import *
 from stegano.encoders import * 
+import torch.nn.functional as F
 
 def init_weights(w):
     """
@@ -21,8 +22,8 @@ def init_weights(w):
         nn.init.constant_(w.bias.data, 0)
 
 # Data parameters
-data_folder = './'  # folder with JSON data files
-crop_size = 96  # crop size of target HR images
+data_folder = './datasets'  # folder with JSON data files
+crop_size = 128  # crop size of target HR images
 scaling_factor = 4  # the scaling factor for the generator; the input LR images will be downsampled from the target HR images by this factor
 
 # Generator parameters
@@ -40,7 +41,7 @@ fc_size_d = 1024  # size of the first fully connected layer
 
 # Learning parameters
 checkpoint = None  # path to model (SRGAN) checkpoint, None if none
-batch_size = 16  # batch size
+batch_size = 8  # batch size
 start_epoch = 0  # start at this epoch
 iterations = 2e5  # number of training iterations
 workers = 4  # number of workers for loading data in the DataLoader
@@ -123,7 +124,7 @@ def main():
     truncated_vgg19 = truncated_vgg19.to(device)
     content_loss_criterion = content_loss_criterion.to(device)
     adversarial_loss_criterion = adversarial_loss_criterion.to(device)
-    stego_loss_criterion = stego_loss_criterion.to(device)
+    #stego_loss_criterion = stego_loss_criterion.to(device)
 
     # Custom dataloaders
     train_dataset = SRDataset(data_folder,
@@ -219,10 +220,10 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
 
         # Generate
         sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
-        container = convert_image(sr_imgs, source='[-1, 1]', target='[0, 255]')  # (N, 3, 96, 96), imagenet-normed
+        containers = convert_image(sr_imgs, source='[-1, 1]', target='[0, 255]')  # (N, 3, 96, 96), imagenet-normed
 
         labels = np.random.choice([0, 1], (batch_size, 1, 1, 1))
-        encodeed_images = []
+        encoded_images = []
         for container, label in zip(containers, labels):
             if label == 1:
                 msg = bytes_to_bits(next(text_iterator))
@@ -232,24 +233,39 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
                 container = encoder.encode(container, msg, key)
                 # to [0...255]
                 container = inverse_transform_encoder(container)
-                encoded_images.append(container)
+            encoded_images.append(container)
 
         encoded_images = torch.stack(encoded_images)
-        labels = torch.from_numpy(labels).float()
+        labels = torch.from_numpy(labels).float().to(device)
 
         # train analyser
         optimizer_s.zero_grad()
 
         encoded_images.detach().to(device)
-        labels.to(device)
+        
+        predict = steganalyzer(encoded_images)
+
+        stego_loss = stego_loss_criterion(predict,labels)
+
+        stego_loss.backward
+        optimizer_s.step()
+
+        labels = torch.logical_xor(labels, torch.tensor(1)).float()
+        optimizer_g.zero_grad()
 
         predict = steganalyzer(encoded_images)
 
         stego_loss = stego_loss_criterion(predict,labels)
 
-
         stego_loss.backward
         optimizer_s.step()
+        
+        for p in generator.parameters():
+            p.grad *= 0.85
+
+        optimizer_g.step()
+
+        losses_s.update(stego_loss.item(),lr_imgs.size(0))
 
         sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
 

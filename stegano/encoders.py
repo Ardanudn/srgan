@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from sgan.stegonagraphy.utils import bits_to_bytes, calculate_sine_step, calculate_multiplier
+from stegano.utils import bits_to_bytes, calculate_sine_step, calculate_multiplier
 
 
 class LeastSignificantBitEncoder:

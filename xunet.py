@@ -76,7 +76,7 @@ class XuNet(nn.Module):
 class Stegoanalyser(nn.Module):
     def __init__(self, *, in_channels=3):
         super().__init__()
-        # Input Dimension: (nc) x 64 x 64
+        # Input Dimension: (nc) x 96 x 96
         weights = 1 / 12 * torch.tensor([
             [-1., 2., -2., 2, -1],
             [2., -6, 8, -6, 2],
@@ -85,13 +85,15 @@ class Stegoanalyser(nn.Module):
             [-1., 2., -2., 2, -1]])
         self.weights = weights.view(1, 1, 5, 5).repeat(3, in_channels, 1, 1)
 
-        self.conv1 = nn.Conv2d(in_channels, 10, 7)
+        self.conv1 = nn.Conv2d(in_channels, 10, 9)  # Adjust kernel size
         self.conv2 = nn.Conv2d(10, 20, 5)
         self.conv3 = nn.Conv2d(20, 30, 3)
         self.conv4 = nn.Conv2d(30, 40, 3)
-        self.mp1 = nn.MaxPool2d(4, 4, padding=1)
+        self.mp1 = nn.MaxPool2d(6, 6, padding=1)  # Adjust kernel size
         self.mp2 = nn.MaxPool2d(2, 2)
-        self.dense1 = nn.Linear(1000, 100)
+        
+        # Update input size for the first Linear layer
+        self.dense1 = nn.Linear(1000, 100)  
         self.dense2 = nn.Linear(100, 1)
 
     def forward(self, x):
