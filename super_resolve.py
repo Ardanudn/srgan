@@ -41,14 +41,16 @@ def visualize_sr(img, halve=False):
     bicubic_img = lr_img.resize((hr_img.width, hr_img.height), Image.BICUBIC)
 
     # Super-resolution (SR) with SRResNet
-    sr_img_srresnet = srresnet(convert_image(lr_img, source='pil', target='imagenet-norm').unsqueeze(0).to(device))
-    sr_img_srresnet = sr_img_srresnet.squeeze(0).cpu().detach()
-    sr_img_srresnet = convert_image(sr_img_srresnet, source='[-1, 1]', target='pil')
+    with torch.no_grad():
+        sr_img_srresnet = srresnet(convert_image(lr_img, source='pil', target='imagenet-norm').unsqueeze(0).to(device))
+        sr_img_srresnet = sr_img_srresnet.squeeze(0).cpu().detach()
+        sr_img_srresnet = convert_image(sr_img_srresnet, source='[-1, 1]', target='pil')
 
     # Super-resolution (SR) with SRGAN
-    sr_img_srgan = srgan_generator(convert_image(lr_img, source='pil', target='imagenet-norm').unsqueeze(0).to(device))
-    sr_img_srgan = sr_img_srgan.squeeze(0).cpu().detach()
-    sr_img_srgan = convert_image(sr_img_srgan, source='[-1, 1]', target='pil')
+    with torch.no_grad():
+        sr_img_srgan = srgan_generator(convert_image(lr_img, source='pil', target='imagenet-norm').unsqueeze(0).to(device))
+        sr_img_srgan = sr_img_srgan.squeeze(0).cpu().detach()
+        sr_img_srgan = convert_image(sr_img_srgan, source='[-1, 1]', target='pil')
 
     # Create grid
     margin = 40

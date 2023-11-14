@@ -7,8 +7,9 @@ from datasets import SRDataset
 from text import TextLoader
 from utils import *
 from stegano.utils import *
-from stegano.encoders import * 
+from stegano.encoders import *
 import torch.nn.functional as F
+from tqdm import tqdm
 
 def init_weights(w):
     """
@@ -23,7 +24,7 @@ def init_weights(w):
 
 # Data parameters
 data_folder = './datasets'  # folder with JSON data files
-crop_size = 128  # crop size of target HR images
+crop_size = 96  # crop size of target HR images
 scaling_factor = 4  # the scaling factor for the generator; the input LR images will be downsampled from the target HR images by this factor
 
 # Generator parameters
@@ -41,7 +42,7 @@ fc_size_d = 1024  # size of the first fully connected layer
 
 # Learning parameters
 checkpoint = None  # path to model (SRGAN) checkpoint, None if none
-batch_size = 8  # batch size
+batch_size = 20  # batch size
 start_epoch = 0  # start at this epoch
 iterations = 2e5  # number of training iterations
 workers = 4  # number of workers for loading data in the DataLoader
@@ -93,10 +94,10 @@ def main():
         steganalyzer = Stegoanalyser()
 
         optimizer_s = torch.optim.Adam(steganalyzer.parameters(), lr==1e-4, betas=(0.5, 0.99))
-        
-        
 
-        
+
+
+
 
 
     else:
@@ -138,7 +139,7 @@ def main():
 
     encoder = SigmoidTorchEncoder(beta=10)
     text_loader = TextLoader()
-    text_iterator = text_loader.create_generator()                                        
+    text_iterator = text_loader.create_generator()
 
     # Total number of epochs to train for
     # epochs = int(iterations // len(train_loader) + 1)
@@ -207,9 +208,12 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
     losses_s = AverageMeter()
 
     start = time.time()
+    loss_balancer = 0.85
+
+    assert 0. < loss_balancer < 1., loss_balancer
 
     # Batches
-    for i, (lr_imgs, hr_imgs) in enumerate(train_loader):
+    for i, (lr_imgs, hr_imgs) in enumerate(tqdm(train_loader)):
         data_time.update(time.time() - start)
 
         # Move to default device
@@ -242,39 +246,32 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
         optimizer_s.zero_grad()
 
         encoded_images.detach().to(device)
-        
+
         predict = steganalyzer(encoded_images)
 
         stego_loss = stego_loss_criterion(predict,labels)
+
 
         stego_loss.backward
         optimizer_s.step()
 
         labels = torch.logical_xor(labels, torch.tensor(1)).float()
-        optimizer_g.zero_grad()
-
         predict = steganalyzer(encoded_images)
-
         stego_loss = stego_loss_criterion(predict,labels)
-
         stego_loss.backward
-        optimizer_s.step()
-        
-        for p in generator.parameters():
-            p.grad *= 0.85
 
-        optimizer_g.step()
+        optimizer_s.step()
 
         losses_s.update(stego_loss.item(),lr_imgs.size(0))
 
-        sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
+        # sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
 
         # Calculate VGG feature maps for the super-resolved (SR) and high resolution (HR) images
-        sr_imgs_in_vgg_space = truncated_vgg19(sr_imgs)
+        sr_imgs_in_vgg_space = truncated_vgg19(encoded_images)
         hr_imgs_in_vgg_space = truncated_vgg19(hr_imgs).detach()  # detached because they're constant, targets
 
         # Discriminate super-resolved (SR) images
-        sr_discriminated = discriminator(sr_imgs)  # (N)
+        sr_discriminated = discriminator(encoded_images)  # (N)
 
         # Calculate the Perceptual loss
         content_loss = content_loss_criterion(sr_imgs_in_vgg_space, hr_imgs_in_vgg_space)
@@ -294,13 +291,13 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
 
         # Keep track of loss
         losses_c.update(content_loss.item(), lr_imgs.size(0))
-        losses_a.update(adversarial_loss.item(), lr_imgs.size(0))        
+        losses_a.update(adversarial_loss.item(), lr_imgs.size(0))
 
         # DISCRIMINATOR UPDATE
 
         # Discriminate super-resolution (SR) and high-resolution (HR) images
         hr_discriminated = discriminator(hr_imgs)
-        sr_discriminated = discriminator(sr_imgs.detach())
+        sr_discriminated = discriminator(encoded_images.detach())
         # But didn't we already discriminate the SR images earlier, before updating the generator (G)? Why not just use that here?
         # Because, if we used that, we'd be back-propagating (finding gradients) over the G too when backward() is called
         # It's actually faster to detach the SR images from the G and forward-prop again, than to back-prop. over the G unnecessarily
@@ -337,14 +334,16 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
                   'Data Time {data_time.val:.3f} ({data_time.avg:.3f})----'
                   'Cont. Loss {loss_c.val:.4f} ({loss_c.avg:.4f})----'
                   'Adv. Loss {loss_a.val:.4f} ({loss_a.avg:.4f})----'
-                  'Disc. Loss {loss_d.val:.4f} ({loss_d.avg:.4f})'.format(epoch,
+                  'Disc. Loss {loss_d.val:.4f} ({loss_d.avg:.4f})----'
+                  'Stego. Loss {loss_s.val:.4f} ({loss_s.avg:.4f})'.format(epoch,
                                                                           i,
                                                                           len(train_loader),
                                                                           batch_time=batch_time,
                                                                           data_time=data_time,
                                                                           loss_c=losses_c,
                                                                           loss_a=losses_a,
-                                                                          loss_d=losses_d))
+                                                                          loss_d=losses_d,
+                                                                          loss_s=losses_s))
 
     del lr_imgs, hr_imgs, sr_imgs, hr_imgs_in_vgg_space, sr_imgs_in_vgg_space, hr_discriminated, sr_discriminated  # free some memory since their histories may be stored
 
