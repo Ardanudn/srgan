@@ -24,8 +24,8 @@ def init_weights(w):
 
 # Data parameters
 data_folder = './datasets'  # folder with JSON data files
-crop_size = 96  # crop size of target HR images
-scaling_factor = 4  # the scaling factor for the generator; the input LR images will be downsampled from the target HR images by this factor
+crop_size = 128  # crop size of target HR images
+scaling_factor = 2  # the scaling factor for the generator; the input LR images will be downsampled from the target HR images by this factor
 
 # Generator parameters
 large_kernel_size_g = 9  # kernel size of the first and last convolutions which transform the inputs and outputs
@@ -143,7 +143,7 @@ def main():
 
     # Total number of epochs to train for
     # epochs = int(iterations // len(train_loader) + 1)
-    epochs = 10
+    epochs = 50
 
     # Epochs
     for epoch in range(start_epoch, epochs):
@@ -206,6 +206,7 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
     losses_a = AverageMeter()  # adversarial loss in the generator
     losses_d = AverageMeter()  # adversarial loss in the discriminator
     losses_s = AverageMeter()
+    gen_mess = AverageMeter()
 
     start = time.time()
     loss_balancer = 0.85
@@ -220,58 +221,44 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
         lr_imgs = lr_imgs.to(device)  # (batch_size (N), 3, 24, 24), imagenet-normed
         hr_imgs = hr_imgs.to(device)  # (batch_size (N), 3, 96, 96), imagenet-normed
 
+        #Discriminator dulu
+        optimizer_d.zero_grad()
+
+        # Discriminate super-resolution (SR) and high-resolution (HR) images
+        hr_discriminated = discriminator(hr_imgs)
+
+        sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
+        sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
+
+        sr_discriminated = discriminator(sr_imgs.detach())
+
+        # Binary Cross-Entropy loss
+        adversarial_loss = adversarial_loss_criterion(sr_discriminated, torch.zeros_like(sr_discriminated)) + \
+                           adversarial_loss_criterion(hr_discriminated, torch.ones_like(hr_discriminated))
+
+        # Back-prop.
+        optimizer_d.zero_grad()
+        adversarial_loss.backward()
+
+        # Clip gradients, if necessary
+        if grad_clip is not None:
+            clip_gradient(optimizer_d, grad_clip)
+
+        # Update discriminator
+        optimizer_d.step()
+
+        # Keep track of loss
+        losses_d.update(adversarial_loss.item(), hr_imgs.size(0))
+        
+
         # GENERATOR UPDATE
 
-        # Generate
-        sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
-        containers = convert_image(sr_imgs, source='[-1, 1]', target='[0, 255]')  # (N, 3, 96, 96), imagenet-normed
-
-        labels = np.random.choice([0, 1], (batch_size, 1, 1, 1))
-        encoded_images = []
-        for container, label in zip(containers, labels):
-            if label == 1:
-                msg = bytes_to_bits(next(text_iterator))
-                key = generate_random_key(container.shape[1:], len(msg))
-                # to 0,255 [-1, 1]
-                container = transform_encoder(container)
-                container = encoder.encode(container, msg, key)
-                # to [0...255]
-                container = inverse_transform_encoder(container)
-            encoded_images.append(container)
-
-        encoded_images = torch.stack(encoded_images)
-        labels = torch.from_numpy(labels).float().to(device)
-
-        # train analyser
-        optimizer_s.zero_grad()
-
-        encoded_images.detach().to(device)
-
-        predict = steganalyzer(encoded_images)
-
-        stego_loss = stego_loss_criterion(predict,labels)
-
-
-        stego_loss.backward
-        optimizer_s.step()
-
-        labels = torch.logical_xor(labels, torch.tensor(1)).float()
-        predict = steganalyzer(encoded_images)
-        stego_loss = stego_loss_criterion(predict,labels)
-        stego_loss.backward
-
-        optimizer_s.step()
-
-        losses_s.update(stego_loss.item(),lr_imgs.size(0))
-
-        # sr_imgs = convert_image(encoded_images, source='[-1, 1]', target='imagenet-norm')  # (N, 3, 96, 96), imagenet-normed
-
-        # Calculate VGG feature maps for the super-resolved (SR) and high resolution (HR) images
-        sr_imgs_in_vgg_space = truncated_vgg19(encoded_images)
+         # Calculate VGG feature maps for the super-resolved (SR) and high resolution (HR) images
+        sr_imgs_in_vgg_space = truncated_vgg19(sr_imgs)
         hr_imgs_in_vgg_space = truncated_vgg19(hr_imgs).detach()  # detached because they're constant, targets
 
         # Discriminate super-resolved (SR) images
-        sr_discriminated = discriminator(encoded_images)  # (N)
+        sr_discriminated = discriminator(sr_imgs)  # (N)
 
         # Calculate the Perceptual loss
         content_loss = content_loss_criterion(sr_imgs_in_vgg_space, hr_imgs_in_vgg_space)
@@ -293,33 +280,52 @@ def train(train_loader, generator, discriminator,steganalyzer, truncated_vgg19, 
         losses_c.update(content_loss.item(), lr_imgs.size(0))
         losses_a.update(adversarial_loss.item(), lr_imgs.size(0))
 
-        # DISCRIMINATOR UPDATE
+        if epoch > 2:
+            # Generate
+            sr_imgs = generator(lr_imgs)  # (N, 3, 96, 96), in [-1, 1]
+            containers = convert_image(sr_imgs, source='[-1, 1]', target='[0, 255]')  # (N, 3, 96, 96), imagenet-normed
 
-        # Discriminate super-resolution (SR) and high-resolution (HR) images
-        hr_discriminated = discriminator(hr_imgs)
-        sr_discriminated = discriminator(encoded_images.detach())
-        # But didn't we already discriminate the SR images earlier, before updating the generator (G)? Why not just use that here?
-        # Because, if we used that, we'd be back-propagating (finding gradients) over the G too when backward() is called
-        # It's actually faster to detach the SR images from the G and forward-prop again, than to back-prop. over the G unnecessarily
-        # See FAQ section in the tutorial
+            labels = np.random.choice([0, 1], (batch_size, 1, 1, 1))
+            encoded_images = []
+            for container, label in zip(containers, labels):
+                if label == 1:
+                    msg = bytes_to_bits(next(text_iterator))
+                    key = generate_random_key(container.shape[1:], len(msg))
+                    # to 0,255 [-1, 1]
+                    container = transform_encoder(container)
+                    container = encoder.encode(container, msg, key)
+                    # to [0...255]
+                    container = inverse_transform_encoder(container)
+                encoded_images.append(container)
 
-        # Binary Cross-Entropy loss
-        adversarial_loss = adversarial_loss_criterion(sr_discriminated, torch.zeros_like(sr_discriminated)) + \
-                           adversarial_loss_criterion(hr_discriminated, torch.ones_like(hr_discriminated))
+            encoded_images = torch.stack(encoded_images)
+            labels = torch.from_numpy(labels).float().to(device)
 
-        # Back-prop.
-        optimizer_d.zero_grad()
-        adversarial_loss.backward()
+            # train analyser
+            optimizer_s.zero_grad()
+            encoded_images.detach().to(device)
+            predict = steganalyzer(encoded_images)
+            mess_loss = stego_loss_criterion(predict,labels)
 
-        # Clip gradients, if necessary
-        if grad_clip is not None:
-            clip_gradient(optimizer_d, grad_clip)
+            mess_loss.backward()
+            losses_s.update(stego_loss.item(),lr_imgs.size(0))
+            optimizer_s.step()
 
-        # Update discriminator
-        optimizer_d.step()
 
-        # Keep track of loss
-        losses_d.update(adversarial_loss.item(), hr_imgs.size(0))
+            optimizer_g.zero_grad()
+
+            labels = torch.logical_xor(labels, torch.tensor(1)).float()
+            predict = steganalyzer(encoded_images)
+            stego_loss = stego_loss_criterion(predict,labels)
+
+            stego_loss.backward()
+            mess_loss.update(stego_loss.item(),lr_imgs.size(0))
+
+            # Clip gradients, if necessary
+            if grad_clip is not None:
+                clip_gradient(optimizer_g, grad_clip)
+
+            optimizer_g.step()
 
         # Keep track of batch times
         batch_time.update(time.time() - start)
