@@ -5,6 +5,8 @@ import random
 import torchvision.transforms.functional as FT
 import torch
 import math
+import csv
+import time
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -228,3 +230,31 @@ def transform_encoder(x: torch.tensor):
 
 def inverse_transform_encoder(x: torch.tensor):
     return 127.5 * (x + 1)
+
+
+def save_losses_to_csv(epoch, batch_time, data_time, losses_c, losses_a, losses_d):
+    """
+    Save losses to a CSV file.
+
+    :param epoch: Current epoch number.
+    :param batch_time: Batch time AverageMeter.
+    :param data_time: Data time AverageMeter.
+    :param losses_c: Content loss AverageMeter.
+    :param losses_a: Adversarial loss AverageMeter.
+    :param losses_d: Discriminator loss AverageMeter.
+    """
+    csv_filename = f'losses_epoch_{epoch}_time_{int(time.time())}.csv'
+    
+    with open(csv_filename, 'a', newline='') as csvfile:
+        fieldnames = ['Epoch', 'Batch Time', 'Data Time', 'Content Loss', 'Adversarial Loss', 'Discriminator Loss']
+        csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+        if csvfile.tell() == 0:
+            csv_writer.writeheader()
+
+        csv_writer.writerow({'Epoch': epoch,
+                             'Batch Time': batch_time.avg,
+                             'Data Time': data_time.avg,
+                             'Content Loss': losses_c.avg,
+                             'Adversarial Loss': losses_a.avg,
+                             'Discriminator Loss': losses_d.avg})
