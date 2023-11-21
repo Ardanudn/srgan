@@ -6,7 +6,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Data
 data_folder = "./datasets"
-test_data_names = [ "test"]
+test_data_names = ["Urban100", "Set5", "Set14", "BSDS100"]
 
 # Model checkpoints
 srgan_checkpoint = "./checkpoint_srgan.pth.tar"

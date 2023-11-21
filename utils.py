@@ -232,10 +232,11 @@ def inverse_transform_encoder(x: torch.tensor):
     return 127.5 * (x + 1)
 
 
-def save_losses_to_csv(epoch, batch_time, data_time, losses_c, losses_a, losses_d):
+def save_losses_to_csv(csv_filename, epoch, batch_time, data_time, losses_c, losses_a, losses_d):
     """
     Save losses to a CSV file.
 
+    :param csv_filename: Filename of the CSV file.
     :param epoch: Current epoch number.
     :param batch_time: Batch time AverageMeter.
     :param data_time: Data time AverageMeter.
@@ -243,8 +244,6 @@ def save_losses_to_csv(epoch, batch_time, data_time, losses_c, losses_a, losses_
     :param losses_a: Adversarial loss AverageMeter.
     :param losses_d: Discriminator loss AverageMeter.
     """
-    csv_filename = f'losses_epoch_{epoch}_time_{int(time.time())}.csv'
-    
     with open(csv_filename, 'a', newline='') as csvfile:
         fieldnames = ['Epoch', 'Batch Time', 'Data Time', 'Content Loss', 'Adversarial Loss', 'Discriminator Loss']
         csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)

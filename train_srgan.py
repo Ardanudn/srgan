@@ -4,6 +4,8 @@ from torch import nn
 from models import Generator, Discriminator, TruncatedVGG19
 from datasets import SRDataset
 from utils import *
+import time
+from datetime import datetime 
 
 # Data parameters
 data_folder = './datasets'  # folder with JSON data files
@@ -108,6 +110,8 @@ def main():
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=workers,
                                                pin_memory=True)
 
+    start_datetime = datetime.now()
+
     # Total number of epochs to train for
     # epochs = int(iterations // len(train_loader) + 1)
     epochs = 100
@@ -121,15 +125,19 @@ def main():
             adjust_learning_rate(optimizer_d, 0.1)
 
         # One epoch's training
-        train(train_loader=train_loader,
-              generator=generator,
-              discriminator=discriminator,
-              truncated_vgg19=truncated_vgg19,
-              content_loss_criterion=content_loss_criterion,
-              adversarial_loss_criterion=adversarial_loss_criterion,
-              optimizer_g=optimizer_g,
-              optimizer_d=optimizer_d,
-              epoch=epoch)
+        batch_time, data_time, losses_c, losses_a, losses_d = train(train_loader=train_loader,
+                                                                    generator=generator,
+                                                                    discriminator=discriminator,
+                                                                    truncated_vgg19=truncated_vgg19,
+                                                                    content_loss_criterion=content_loss_criterion,
+                                                                    adversarial_loss_criterion=adversarial_loss_criterion,
+                                                                    optimizer_g=optimizer_g,
+                                                                    optimizer_d=optimizer_d,
+                                                                    epoch=epoch)
+        
+        # Save losses to CSV file
+        save_losses_to_csv(f'Training_{epochs}_epochs_time_{start_datetime.strftime("%Y%m%d%H%M%S")}.csv',
+                           epoch, batch_time, data_time, losses_c, losses_a, losses_d)
 
         # Save checkpoint
         torch.save({'epoch': epoch,
@@ -257,11 +265,11 @@ def train(train_loader, generator, discriminator, truncated_vgg19, content_loss_
                                                                           loss_c=losses_c,
                                                                           loss_a=losses_a,
                                                                           loss_d=losses_d))
-        # Save losses to CSV file
-        save_losses_to_csv(epoch, batch_time, data_time, losses_c, losses_a, losses_d)
 
 
     del lr_imgs, hr_imgs, sr_imgs, hr_imgs_in_vgg_space, sr_imgs_in_vgg_space, hr_discriminated, sr_discriminated  # free some memory since their histories may be stored
+
+    return batch_time, data_time, losses_c, losses_a, losses_d
 
 
 if __name__ == '__main__':
